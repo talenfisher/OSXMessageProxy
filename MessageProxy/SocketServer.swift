@@ -7,7 +7,8 @@
 //
 
 import Foundation
-import Socket
+import Network
+import Starscream
 import Dispatch
 
 
@@ -28,152 +29,147 @@ import Dispatch
 
 
 /// A socket server to provide live updates on messaging, sort of.
-class SocketServer : NSObject {
-    var API_TOKEN:String?
+@available(OSX 10.15, *)
+public class SocketServer {
     
-    let SOCKET_SERVER_PORT = 8736 //The port to run the socket server at
-    
-    static let bufferSize = 4096
-    var listenSocket: Socket? = nil
-    var continueRunning = true
-    var connectedSockets = [Int32: Socket]()
-    let socketLockQueue = DispatchQueue(label: "com.CarbonDev.MessageProxy.SocketThread")
+    public var onEvent: ((ServerEvent) -> Void)?
+    private var listener: NWListener!
+    private var connections: [Int: ServerConnection] = [:]
+    private let messageQueue = DispatchQueue(label: "com.TalenFisher.MessageProxy.SocketServerQueue", attributes: [])
     
     deinit {
-        // Close all open sockets...
-        for socket in connectedSockets.values {
-            socket.close()
-            print("[socket] deint socket")
-        }
-        self.listenSocket?.close()
-    }
-    
-    
-    /// Create a socket server and start it with a specific password
-    ///
-    /// - Parameter passwordProtectionToken: The password
-    init(passwordProtectionToken:String) {
-        super.init()
+        self.listener?.stateUpdateHandler = nil
+        self.listener?.newConnectionHandler = nil
+        self.listener?.cancel()
         
-        API_TOKEN = passwordProtectionToken
-        setupServer()
-    }
-    
-    
-    /// Build the server
-    func setupServer() {
-        DispatchQueue.global(qos: .background).async {
-            [unowned self] in
-            
-            do {
-                // Create an IPV6 socket...
-                try self.listenSocket = Socket.create(family: .inet)
-                
-                guard let socket = self.listenSocket else {
-                    
-                    print("[socket] Unable to unwrap socket...")
-                    return
-                }
-                
-                try socket.listen(on: self.SOCKET_SERVER_PORT)
-                
-                print("[socket] Listening on port: \(socket.listeningPort)")
-                
-                repeat {
-                    let newSocket = try socket.acceptClientConnection()
-                    
-                    print("[socket] Accepted connection from: \(newSocket.remoteHostname) on port \(newSocket.remotePort)")                    
-                    self.addNewConnection(socket: newSocket)
-                    
-                } while self.continueRunning
-                
-            }
-            catch let error {
-                guard let socketError = error as? Socket.Error else {
-                    print("[socket] Unexpected error...")
-                    return
-                }
-                
-                if self.continueRunning {
-                    
-                    print("[socket] Error reported:\n \(socketError.description)")
-                    
-                }
-            }
+        for connection in self.connections.values {
+            connection.didStopCallback = nil
+            connection.stop()
         }
     }
     
+    public init() {
+        let parameters = NWParameters(tls: nil)
+        let options = NWProtocolWebSocket.Options()
+        options.autoReplyPing = true
+        parameters.defaultProtocolStack.applicationProtocols.insert(options, at: 0)
+        
+        listener = try! NWListener(using: parameters, on: 8736)
+        listener.stateUpdateHandler = self.stateChanged(to:)
+        listener.newConnectionHandler = self.accept(connection:)
+        listener.start(queue: .main)
+    }
     
-    /// Handle a new connection. Here is where we do authentication on the socket
-    ///
-    /// - Parameter socket: The socket
-    func addNewConnection(socket: Socket) {
-        
-        // Get the global concurrent queue...
-        let queue = DispatchQueue.global(qos: .default)
-        
-        // Create the run loop work item and dispatch to the default priority global queue...
-        queue.async { [unowned self, socket] in
-            var readData = Data(capacity: SocketServer.bufferSize)
-            do {
-                //Prepare socket
-                try socket.setReadTimeout(value: 2000)
-                try socket.setWriteTimeout(value: 2000)
-                // Write the welcome string...
-                try socket.write(from: "ACK\n")
-                _ = try socket.read(into: &readData)
-                if String(data: readData, encoding: .utf8)?.replacingOccurrences(of: "\n", with: "") == self.API_TOKEN {
-                    try socket.write(from: "READY\n")
-                    // Add the new socket to the list of connected sockets since they are ready
-                    self.socketLockQueue.sync { [unowned self, socket] in
-                        self.connectedSockets[socket.socketfd] = socket
-                    }
-                }else {
-                    try socket.write(from: "FAIL\n")
-                    socket.close()
-                }
-                
-                print("[socket] Socket: \(socket.remoteHostname):\(socket.remotePort) closed...")
-                
-                
-                
-            }
-            catch let error {
-                guard let socketError = error as? Socket.Error else {
-                    print("[socket] Unexpected error by connection at \(socket.remoteHostname):\(socket.remotePort)...")
-                    return
-                }
-                if self.continueRunning {
-                    print("[socket] Error reported by connection at \(socket.remoteHostname):\(socket.remotePort):\n \(socketError.description)")
-                }
-            }
+    func stateChanged(to state: NWListener.State) {
+        switch state {
+            case .failed(let error):
+                print("Server failure, error: \(error.localizedDescription)")
+                exit(EXIT_FAILURE)
+            default:
+                break
         }
     }
     
-    
-    /// Send a message to all the clients. It needs to be in the following format
-    /// {"type" : "some message type", "content" : YOUR JSON OBJECT}
-    ///
-    /// - Parameter jsonMessage: The json message in the specified format
-    func sendSocketBroadcast(jsonMessage:String) {
-        //Kill the new lines. If they're doing JSON it shouldn't matter. Safety first. We only want one new line and that's at the end because we are using .readLine in the client
-        let jsonMessage = jsonMessage.replacingOccurrences(of: "\n", with: "") + "\n"
-        //Get lock so we don't run over eachother with multiple socket messages
-        self.socketLockQueue.sync { [unowned self] in
-            for socket in self.connectedSockets.values {
-                do {
-                    //Log since we aren't heartbeat
-                    if !jsonMessage.contains("TCPALIVE") {
-                        print("[socket] -->Sending \(jsonMessage) to socket at \(socket.remoteHostname):\(socket.remotePort)")
-                    }
-                    try socket.write(from: jsonMessage)
-                }catch let error {
-                    print("[socket] Error reported by connection at \(socket.remoteHostname):\(socket.remotePort):\n \(error) ---> Disconnecting!")
-                    //We failed to send them a message, deauth
-                    self.connectedSockets.removeValue(forKey: socket.socketfd)
-                }
+    private func accept(connection: NWConnection) {
+        let connection = ServerConnection(nwConnection: connection)
+        connections[connection.id] = connection
+        
+        connection.start()
+        
+        connection.didStopCallback = { err in
+            if let err = err {
+                print(err)
             }
+            self.connectionEnded(connection)
+        }
+    }
+    
+    private func connectionEnded(_ connection: ServerConnection) {
+        self.connections.removeValue(forKey: connection.id)
+    }
+    
+    public func broadcast(message: String) {
+        let messageData = message.data(using: .utf8)
+        
+        if messageData == nil {
+            return
         }
         
+        self.messageQueue.sync { [unowned self] in
+            for connection in self.connections.values {
+                connection.send(data: messageData!)
+            }
+        }
+    }
+}
+
+class ServerConnection {
+    private static var nextID: Int = 0
+    let connection: NWConnection
+    let id: Int
+
+    init(nwConnection: NWConnection) {
+        connection = nwConnection
+        id = ServerConnection.nextID
+        ServerConnection.nextID += 1
+    }
+    
+    deinit {
+        print("deinit")
+    }
+
+    var didStopCallback: ((Error?) -> Void)? = nil
+    var didReceive: ((Data) -> ())? = nil
+
+    func start() {
+        print("connection \(id) will start")
+        connection.stateUpdateHandler = self.stateDidChange(to:)
+        connection.start(queue: .main)
+    }
+
+    private func stateDidChange(to state: NWConnection.State) {
+        switch state {
+        case .waiting(let error):
+            connectionDidFail(error: error)
+        case .failed(let error):
+            connectionDidFail(error: error)
+        default:
+            break
+        }
+    }
+
+
+    func send(data: Data, opcode: NWProtocolWebSocket.Opcode = .text) {
+        let metaData = NWProtocolWebSocket.Metadata(opcode: opcode)
+        let context = NWConnection.ContentContext (identifier: "context", metadata: [metaData])
+        self.connection.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed( { error in
+            if let error = error {
+                self.connectionDidFail(error: error)
+                return
+            }
+        }))
+    }
+
+    func stop() {
+        print("connection \(id) stopped")
+    }
+
+    private func connectionDidFail(error: Error) {
+        print("connection \(id) error: \(error)")
+        stop(error: error)
+    }
+
+    private func connectionDidEnd() {
+        print("connection \(id) ending")
+        stop(error: nil)
+    }
+
+    private func stop(error: Error?) {
+        connection.stateUpdateHandler = nil
+        connection.cancel()
+        if let didStopCallback = didStopCallback {
+            self.didStopCallback = nil
+            didStopCallback(error)
+        }
     }
 }

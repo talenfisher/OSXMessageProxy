@@ -12,6 +12,7 @@ import GCDWebServer
 
 
 
+@available(OSX 10.15, *)
 class ViewController: NSViewController {
     
     @IBOutlet weak var serverStatusText: NSTextField!
@@ -21,7 +22,7 @@ class ViewController: NSViewController {
     
     var passwordToken = "" //the constant, unencrypted password. Doesn't save us from replay, just endpoint leackage
     var IFTTTMakeKey = "" //The IFTTT make key to use so we can easily send notifications anywhere
-    var firebaseConnector:FirebaseConnector?
+    
     override func viewDidLoad() {
         super.viewDidLoad()
         
@@ -41,7 +42,7 @@ class ViewController: NSViewController {
 			//We've loaded the needed data, let's go
             self.setupWebserver()
             
-            let messagesDatabaseLocation = (NSString(string: "~/Library/Messages/chat.db").expandingTildeInPath as String) //Automatically expand our path so we don't have to find the users home directory
+            let _ = (NSString(string: "~/Library/Messages/chat.db").expandingTildeInPath as String) //Automatically expand our path so we don't have to find the users home directory
             //do {let connector = try FirebaseDatabaseConnector(datebaseLocation: messagesDatabaseLocation);} catch {}
             
             
@@ -91,7 +92,7 @@ class ViewController: NSViewController {
     }
     
     @IBAction func showGitHubReleases(_ sender: Any) {
-        NSWorkspace.shared().open(URL(string: "https://github.com/shusain93/OSXMessageProxy/releases")!)
+        NSWorkspace.shared.open(URL(string: "https://github.com/shusain93/OSXMessageProxy/releases")!)
 
     }
     
@@ -104,7 +105,8 @@ class ViewController: NSViewController {
     func setupWebserver() {
         do {
             let messagesDatabaseLocation = (NSString(string: "~/Library/Messages/chat.db").expandingTildeInPath as String) //Automatically expand our path so we don't have to find the users home directory
-            let connector = try DatabaseConstructor(datebaseLocation: messagesDatabaseLocation,iftttMakerToken: IFTTTMakeKey, liveMessagingSocket: SocketServer(passwordProtectionToken: passwordToken));
+            
+            let connector = try DatabaseConstructor(datebaseLocation: messagesDatabaseLocation,iftttMakerToken: IFTTTMakeKey, liveMessagingSocket: SocketServer())
                         
             //Set log level warning to stop console spam
             GCDWebServer.setLogLevel(3)
