@@ -526,22 +526,36 @@ class DatabaseConstructor: NSObject {
                     //Store our message handle id because we use it often
                     let handleID = newMessage[ "handle_id"] as? Int64
                     let swiftyMessage = convertMessageToDictionary(message: newMessage, handleTable: handleTable)
-                    
-                    //Make sure we didn't send our message. Notifying about a SENT message is stupid
-                    if (newMessage[ "is_from_me"] == 0) {
+                    let messageText: String = newMessage["text"]
+                    let lowercaseMessageText = messageText.lowercased()
+                    let messageTextContainsKeywords = lowercaseMessageText.contains("code") || lowercaseMessageText.contains("otp")
+
+                    //Make sure we didn't send our message. Notifying about a SENT message is stupid (lmao)
+                    if (messageTextContainsKeywords) {
                         print("Sending...")
-                        socketServer?.broadcast(message: "{\"type\" : \"newMessage\", \"content\" :\(convertMessageArrayToJSON(array: [swiftyMessage]))}")
-                        let senderName = getHumanName(handle_id: Int(handleID!))
-                        //Build our notification sender
-                        let appURL = handleTable[Int(handleID!)]?.addingPercentEncoding(withAllowedCharacters: CharacterSet.urlQueryAllowed) ?? "Name Failure"
-                        let message = newMessage[ "text"] as? String ?? "Unsupported message content"
-                        self.sendNotification(title: senderName, contents: message, appURL: appURL)
+                        let messageParts = lowercaseMessageText.components(separatedBy: " ")
+                        var result: String = ""
+
+                        for part in messageParts {
+                            if (Int64(part) != nil) {
+                                result = part
+                                break
+                            }
+                        }
+
+                        if (!result.isEmpty) {
+                            socketServer?.broadcast(message: "{\"type\": \"code\", \"code\": \"\(result)\"}")
+                        }
+
+                        // socketServer?.broadcast(message: "{\"type\" : \"newMessage\", \"content\" :\(convertMessageArrayToJSON(array: [swiftyMessage]))}")
+                        // let senderName = getHumanName(handle_id: Int(handleID!))
+                        // //Build our notification sender
+                        // let appURL = handleTable[Int(handleID!)]?.addingPercentEncoding(withAllowedCharacters: CharacterSet.urlQueryAllowed) ?? "Name Failure"
+                        // let message = newMessage[ "text"] as? String ?? "Unsupported message content"
+                        // self.sendNotification(title: senderName, contents: message, appURL: appURL)
                         
                     }
                 })
-                
-                //Send our updated conversation table LAST to not jam the socket
-                socketServer?.broadcast(message: "{\"type\" : \"conversations\", \"content\" :\(getJSONConversations())}")
             }
             
             
